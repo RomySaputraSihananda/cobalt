@@ -32,8 +32,8 @@ services:
     # ponytail: chromium inside needs a real shm (default 64mb crashes it,
     # see shm_size below). even with that fixed, the extractor has been flaky
     # in testing (silently produced empty tunnels) — treat this as best-effort,
-    # not a guarantee youtube downloads always work. bump priority if SRE sees
-    # repeated youtube fetch failures in cobalt logs.
+    # not a guarantee youtube downloads always work.
+    # known unresolved upstream bug, see docs/troubleshooting-yt-session-generator.md
     yt-session-generator:
         image: ghcr.io/imputnet/yt-session-generator:webserver
         restart: unless-stopped

@@ -1,0 +1,40 @@
+services:
+    cobalt:
+        # builds from the fork's main branch (includes threads support,
+        # not yet in upstream cobalt); swap for `image: ghcr.io/imputnet/cobalt:11`
+        # once/if threads support lands upstream
+        build:
+            context: https://github.com/RomySaputraSihananda/cobalt.git#main
+        image: cobalt-threads:latest
+
+        init: true
+        read_only: true
+        restart: unless-stopped
+        container_name: cobalt
+
+        ports:
+            - ${COBALT_PORT:-9000}:9000/tcp
+
+        environment:
+            # public URL this instance is reachable at (tunneling breaks otherwise)
+            API_URL: ${API_URL}
+
+            # ponytail: best-effort youtube poToken source, not guaranteed to work
+            # every time — see note on the yt-session-generator service below
+            YOUTUBE_SESSION_SERVER: http://yt-session-generator:8080/
+
+        depends_on:
+            - yt-session-generator
+
+    # supplies poToken/visitor_data so youtube downloads work more reliably.
+    # not exposed on the host — only cobalt talks to it, over the compose network.
+    #
+    # ponytail: chromium inside needs a real shm (default 64mb crashes it,
+    # see shm_size below). even with that fixed, the extractor has been flaky
+    # in testing (silently produced empty tunnels) — treat this as best-effort,
+    # not a guarantee youtube downloads always work. bump priority if SRE sees
+    # repeated youtube fetch failures in cobalt logs.
+    yt-session-generator:
+        image: ghcr.io/imputnet/yt-session-generator:webserver
+        restart: unless-stopped
+        shm_size: 1gb

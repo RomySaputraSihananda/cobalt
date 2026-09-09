@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import Cookie from "../cookie/cookie.js";
 
 import { extract, normalizeURL } from "../url.js";
@@ -7,6 +9,66 @@ import { createStream } from "../../stream/manage.js";
 import { convertLanguageCode } from "../../misc/language-codes.js";
 
 const shortDomain = "https://vt.tiktok.com/";
+
+// tiktok's edge serves a "please wait" page with a SHA256 proof-of-work
+// challenge to requests it doesn't recognize (datacenter IPs, new clients).
+// a real browser solves this in JS in ~50ms; we solve it the same way so
+// the actual SSR page (with __UNIVERSAL_DATA_FOR_REHYDRATION__) comes back.
+// same technique yt-dlp uses (TikTokBaseIE._solve_challenge_and_set_cookies).
+function solveWafChallenge(html) {
+    const csMatch = html.match(/<p id="cs" class="([^"]+)"/);
+    if (!csMatch) return null;
+
+    const padded = csMatch[1] + "=".repeat((4 - (csMatch[1].length % 4)) % 4);
+    const data = JSON.parse(Buffer.from(padded, "base64").toString());
+
+    const seed = Buffer.from(data.v.a, "base64");
+    const target = Buffer.from(data.v.c, "base64").toString("hex");
+
+    let solution;
+    for (let i = 0; i <= 1_000_000; i++) {
+        const digest = createHash("sha256").update(seed).update(String(i)).digest("hex");
+        if (digest === target) {
+            solution = i;
+            break;
+        }
+    }
+    if (solution === undefined) return null;
+
+    data.d = Buffer.from(String(solution)).toString("base64");
+
+    const wciMatch = html.match(/<p id="wci" class="([^"]*)"/);
+    const pairs = [[
+        wciMatch?.[1] || "_wafchallengeid",
+        Buffer.from(JSON.stringify(data)).toString("base64"),
+    ]];
+
+    const rciMatch = html.match(/<p id="rci" class="([^"]+)"/);
+    const rsMatch = html.match(/<p id="rs" class="([^"]+)"/);
+    if (rciMatch && rsMatch) pairs.push([rciMatch[1], rsMatch[1]]);
+
+    return pairs;
+}
+
+async function fetchWithWafBypass(url, headers) {
+    let res = await fetch(url, { headers });
+    let html = await res.text();
+
+    if (!html.includes("__UNIVERSAL_DATA_FOR_REHYDRATION__")) {
+        const pairs = solveWafChallenge(html);
+        if (pairs) {
+            const cookie = pairs.map(([k, v]) => `${k}=${v}`).join('; ');
+            const retryHeaders = {
+                ...headers,
+                cookie: headers.cookie ? `${headers.cookie}; ${cookie}` : cookie,
+            };
+            res = await fetch(url, { headers: retryHeaders });
+            html = await res.text();
+        }
+    }
+
+    return { res, html };
+}
 
 export default async function(obj) {
     const cookie = new Cookie({});
@@ -33,15 +95,11 @@ export default async function(obj) {
     if (!postId) return { error: "fetch.short_link" };
 
     // should always be /video/, even for photos
-    const res = await fetch(`https://www.tiktok.com/@i/video/${postId}`, {
-        headers: {
-            "user-agent": genericUserAgent,
-            cookie,
-        }
-    })
+    const { res, html } = await fetchWithWafBypass(`https://www.tiktok.com/@i/video/${postId}`, {
+        "user-agent": genericUserAgent,
+        cookie,
+    });
     updateCookie(cookie, res.headers);
-
-    const html = await res.text();
 
     let detail;
     try {
